@@ -98,7 +98,8 @@ export async function concurrentDownloadBatch(hits, dir, { concurrency = 5, size
         const url = pickUrl(hit, size);
         if (!url) {
           failed.push({
-            pixabay_id: hit && hit.id,
+            id: hit && hit.id,
+            source: hit && hit.source,
             url: "",
             reason: "No URL available",
           });
@@ -113,11 +114,14 @@ export async function concurrentDownloadBatch(hits, dir, { concurrency = 5, size
           tags: hit.tags,
           width: hit.imageWidth,
           height: hit.imageHeight,
-          pixabay_id: hit.id,
+          id: hit.id,
+          source: hit.source || "pixabay",
+          pixabay_id: hit.id, // 向后兼容：旧测试检查 pixabay_id
         });
       } catch (err) {
         failed.push({
-          pixabay_id: hit && hit.id,
+          id: hit && hit.id,
+          source: hit && hit.source,
           url: pickUrl(hit, size),
           reason: err.message || String(err),
         });

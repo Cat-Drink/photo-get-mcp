@@ -1,119 +1,126 @@
-# evergreen.photos 图片抓取 MCP - 实现计划 (Implementation Plan / Tasks)
+# MCP 图片抓取 — 补充 picjumbo.com 源 · 实现计划 (tasks.md)
 
-## [ ] Task 1: 项目脚手架初始化
+## [ ] Task 1: 新增 `src/picjumbo.js` — picjumbo.com 轻量抓取客户端（健壮分页）
 - **Priority**: P0
 - **Depends On**: None
 - **Description**:
-  - 在 `d:\Program\photo-get-skill` 下执行 `npm init -y` 生成 `package.json`。
-  - 安装依赖：`@modelcontextprotocol/sdk`、`zod`；添加 `engines: { node: ">=18" }`。
-  - 创建基础目录结构：`src/`、`tests/`、`examples/`。
-  - 创建 `.gitignore`（忽略 `node_modules/`、`tmp/`、`*.log`、`.env`）。
-- **Acceptance Criteria Addressed**: 为 FR-1、FR-12 打基础
+  - 导出 `async searchImages({ keyword, count })`：
+    - `keyword` 为空或仅含空白时直接返回 `[]`。
+    - 分页：从 `page=1` 开始，URL 为 `https://picjumbo.com/search/{encodedKeyword}/page/{page}/`；同时第 1 页也可以不指定 page，直接 `https://picjumbo.com/search/{encodedKeyword}/`。
+    - 分页边界探测：
+      - 若 GET 返回 `status === 404` 或响应体为空字符串 → 停止；
+      - 解析当前页中的详情页 URL 列表，若与前一页完全相同或为空 → 停止；
+      - 解析当前页底部出现的分页链接（页码或 `下一页 / next` 等），作为继续翻页的依据；
+      - 设置最大页数上限（如 100 页），避免死循环；
+      - 一旦 hits 长度达到 `count` 立即停止。
+    - 每页解析：
+      - 提取 `<a href="https://picjumbo.com/{slug}/">` 中的详情页 URL，去重（以 URL 为 key）；
+      - 并发（≤ 5）获取每个详情页 HTML，解析：
+        - `<meta property="og:image" content="...">` → `largeImageURL`；
+        - 页面中出现的缩略图（含 `picjumbo.com/wp-content/...`），取较小尺寸作 `previewURL`、稍大尺寸作 `webformatURL`；
+        - 从 `<title>` 中提取标题，切词作为 tags 的一部分；原始 keyword 也加入 tags；
+        - 从正文中解析作者文本（`by ...`）或作者链接（如 `author/viktorhanacek`），失败时默认 `user="picjumbo"`；
+        - `id`：从正文中 `download?image=<id>` 提取；若不存在则使用 slug 的稳定字符串（例如 slug 本身或其 hash）。
+    - 对解析出的 URL 做 host 白名单校验：`picjumbo.com`, `i.picjumbo.com`, `picjumbo` 子域名；不在白名单的 URL 丢弃。
+    - 返回 hits，字段：`{ id, source:"picjumbo", previewURL, webformatURL, largeImageURL, user, tags, imageWidth, imageHeight, page_url }`；尺寸字段未解析到时写 `0`。
+  - 导出错误类型：`NetworkError`（网络层面）、`PicjumboScrapeError`（解析/业务层面）。
+  - 网络策略：超时 30s，失败重试至多 2 次。
+  - 可选 CLI smoke：当脚本以主模块运行时，执行 `searchImages({ keyword: "nature", count: 5 })` 并打印 hits 总数与首个 hit 的 largeImageURL。
+- **Acceptance Criteria Addressed**: FR-1, G3, G4, NFR-1, NFR-2, NFR-3
 - **Test Requirements**:
-  - `programmatic` TR-1.1: 运行 `npm install` 成功退出（exit code 0）。
-  - `programmatic` TR-1.2: `package.json` 中 `dependencies` 含 `@modelcontextprotocol/sdk` 与 `zod`。
-  - `programmatic` TR-1.3: `src/`、`tests/` 目录存在。
-- **Notes**: 保持 `package.json` 的 `name` 为 `photo-get-skill`，`main` 指向 `src/server.js`。
+  - `programmatic` TR-1.1: `await picjumbo.searchImages({ keyword: "nature", count: 5 })` 返回 hits 长度 ≥ 1，每个 hit 含 `source === "picjumbo"`。
+  - `programmatic` TR-1.2: 每个 hit 字段完整（`id / previewURL / webformatURL / largeImageURL / user / tags`）；`largeImageURL` 以 `https://` 开头且 host 属于 picjumbo。
+  - `programmatic` TR-1.3: `searchImages({ keyword: "", count: 3 })` 返回 `[]`，不抛异常。
+  - `programmatic` TR-1.4: 对返回条数较多的关键词（例如 `nature`），当 `count` 未设上限时（或传较大 `count` 如 50），返回 hits 数超过单页数量，证明分页工作。
 
-## [ ] Task 2: Pixabay API 客户端模块 (src/pixabay.js)
+## [ ] Task 2: 扩展 `src/tools.js` — `source` 支持多值，结果区分来源
 - **Priority**: P0
 - **Depends On**: Task 1
 - **Description**:
-  - 导出 `searchImages({ keyword, perPage, page, safesearch, apiKey })` 函数。
-  - 对 `keyword` 做 URL encode；对响应做 JSON 解析与错误处理（网络错误、400 Invalid key）。
-  - 对 `count > 200` 进行多次分页聚合（最多 500 条）。
-  - 统一的错误类型：`PixabayApiError`（带 HTTP status）与 `NetworkError`。
-  - 默认 API Key 来源于代码内常量 + 允许环境变量 `PHOTO_GET_API_KEY` 覆盖。
-- **Acceptance Criteria Addressed**: FR-4、AC-2、AC-4
+  - `searchAndDownloadImagesSchema` 中：
+    - 原 `source` 改为 `z.union([z.enum(["pixabay", "picjumbo"]), z.array(z.enum(["pixabay","picjumbo"])).min(1)]).default(["pixabay"])`。
+    - 在 handler 内 normalize：`const sources = Array.isArray(parsed.data.source) ? parsed.data.source : [parsed.data.source];`。
+  - `searchAndDownloadImagesInputSchema` 中：
+    - `source: { oneOf: [{ type: "string", enum: ["pixabay","picjumbo"] }, { type: "array", items: { type: "string", enum: ["pixabay","picjumbo"] }, minItems: 1 }], default: ["pixabay"], description: "图片来源，可传单个字符串或数组，默认 pixabay" }`。
+  - Handler 分派逻辑：
+    - 若 `sources.length === 1`：直接调用对应源的 `searchImages({ keyword, count, safesearch })`。
+    - 若 `sources.length > 1`：按源均匀分配 `count`（每源 `Math.ceil(count / sources.length)`），并发生成，合并 hits 时按 source 顺序拼接，最后再截取到 `count`；也可改为按传入顺序顺序执行后合并。
+    - 单源失败（抛异常）时：将该源的错误记录到一个错误集合；若所有源都失败，则整体返回 `isError: true` 的错误；若部分源成功，照常下载成功 hits，`summary` 中提示失败的 source。
+  - 每个 hit 必须已经带有 `source` 字段（pixabay.js 中需确保也写入 `source:"pixabay"`，若原先没有则补充）。
+  - `summary`：按照 source 聚合出各源成功下载数量，例如 `已下载 3 张图片至 <dir>（pixabay 2 张，picjumbo 1 张），失败 0 张。关键词: nature`。
+- **Acceptance Criteria Addressed**: FR-2, FR-3, G2, G3, G5, AC-1, AC-3, AC-5
 - **Test Requirements**:
-  - `programmatic` TR-2.1: `await searchImages({ keyword: "nature", count: 3 })` 返回 `hits.length===3`。
-  - `programmatic` TR-2.2: 使用无效 Key 调用时抛出 `PixabayApiError`（message 含 "Invalid"）。
-  - `programmatic` TR-2.3: `count=250` 时能正确分页，返回最多 250 条，不超过 500 条限制。
-  - `programmatic` TR-2.4: 返回 hit 项含 `id, webformatURL, largeImageURL, previewURL, user, tags, imageWidth, imageHeight`。
+  - `programmatic` TR-2.1: schema 对 `source="unknown"` 校验失败；对 `source=["pixabay","unknown"]` 校验失败。
+  - `programmatic` TR-2.2: schema 缺省值为 `["pixabay"]`；允许 `source="pixabay"` 也允许 `source=["pixabay","picjumbo"]`。
+  - `programmatic` TR-2.3: 对 `source="picjumbo"` 走 picjumbo 分支；对多 source 返回 payload 中同时出现不同 source 的 downloaded 项。
 
-## [ ] Task 3: 图片下载器模块 (src/downloader.js)
-- **Priority**: P0
+## [ ] Task 3: 扩展 `src/downloader.js` — 让下载结果包含 `source` 字段
+- **Priority**: P1
+- **Depends On**: Task 2
+- **Description**:
+  - `concurrentDownloadBatch` 中对每个 hit 的 downloaded/failed 项新增透传 `source: hit.source`；若缺失则写 `source:"unknown"`，但日志中警告一次。
+  - 对 Pixabay source 也确保 `source` 字段存在（由 pixabay.js 保证写入 `source:"pixabay"`）。
+- **Acceptance Criteria Addressed**: FR-4
+- **Test Requirements**:
+  - `programmatic` TR-3.1: E2E 测试中 downloaded 项均含 `source` 字段。
+
+## [ ] Task 4: 同步 `src/server.js` schema
+- **Priority**: P1
+- **Depends On**: Task 2
+- **Description**:
+  - 将 `src/server.js` 中 `search_and_download_images` 的 Zod schema 也加上多值 `source` 字段（与 `tools.js` 一致）。
+  - 保持默认值 `["pixabay"]`，以便原 E2E 调用不传 source 仍走 Pixabay。
+- **Acceptance Criteria Addressed**: FR-5, AC-1
+- **Test Requirements**:
+  - `programmatic` TR-4.1: 旧 E2E 调用（无 source）仍走 Pixabay 分支并返回与之前一致的 payload。
+
+## [ ] Task 5: 确保 `src/pixabay.js` 输出 hit 也带 `source:"pixabay"`
+- **Priority**: P1
 - **Depends On**: Task 1
 - **Description**:
-  - `downloadImage(url, destPath, { retries: 2, timeout: 30_000 })`：流式写入到临时文件，成功后重命名；失败重试。
-  - `ensureDir(dir)`：使用 `fs.mkdirSync(path, { recursive: true })`。
-  - `pickUrl(hit, size)`：根据 `size ∈ { preview, webformat, large }` 选择对应 URL。
-  - `slugify(s)`：只保留字母数字和 `-`，替换空格为 `-`。
-  - `buildFileName(hit)`：`<pixabay_id>-<slug_first_tag>.jpg`。
-  - `concurrentDownloadBatch(items, dir, { concurrency: 5, size })`：并发下载，结果分桶到 `downloaded / failed` 列表。
-  - 下载后校验 `fs.stat.size > 0`，否则抛错进入重试。
-- **Acceptance Criteria Addressed**: FR-5、FR-6、FR-7、FR-8、FR-9、AC-6
+  - 在 pixabay 的 hits 生成循环中，对每个 hit 补充 `source: "pixabay"`。最小改动，避免影响已有字段。
+- **Acceptance Criteria Addressed**: FR-4, AC-1
 - **Test Requirements**:
-  - `programmatic` TR-3.1: `ensureDir("tmp/sub/nested")` 创建多层目录。
-  - `programmatic` TR-3.2: 调用 `downloadImage` 下载一张已知图片 URL，本地文件 `size > 10_000`。
-  - `programmatic` TR-3.3: 对不可达 URL `http://0.0.0.0:1/nothing.jpg` 调用 `downloadImage`，返回失败，不抛出进程级异常。
-  - `programmatic` TR-3.4: `buildFileName({id:123, tags:"sunset, beach"})` 返回 `123-sunset.jpg`。
+  - `programmatic` TR-5.1: `pixabay.searchImages(...)` 返回的第一个 hit 含 `source === "pixabay"`。
 
-## [ ] Task 4: MCP Tool 处理器 (src/tools.js)
+## [ ] Task 6: 新增 `tests/picjumbo.test.js`（单元 + 端到端 + 多源）
 - **Priority**: P0
-- **Depends On**: Task 2, Task 3
+- **Depends On**: Task 1, 2, 3, 4, 5
 - **Description**:
-  - 使用 `zod` 定义 `searchAndDownloadImagesSchema`（keyword, save_dir, count, size, safesearch）。
-  - 导出 `tools` 数组（供 MCP Server 注册）及对应 `handler`。
-  - handler 流程：参数校验 → 调用 `searchImages` → `ensureDir(save_dir)` → `concurrentDownloadBatch` → 组装 `{ total, downloaded, failed, save_dir, summary }` 并作为 MCP 文本/JSON 内容返回。
-  - 对异常情况（网络/无效 Key）捕获，返回 `{ isError: true, text: "..." }` 的 MCP 内容而不崩溃。
-  - `summary` 文本字段："已下载 X 张图片至 <save_dir>，Y 张失败"。
-- **Acceptance Criteria Addressed**: FR-3、FR-10、AC-1、AC-5
+  - 单元：
+    - `picjumbo.searchImages({ keyword:"nature", count: 3 })` → hits 长度 ≥ 1，每个 hit.source === "picjumbo"。
+    - `picjumbo.searchImages({ keyword:"", count: 3 })` → 返回 `[]`。
+    - 以较大 `count`（如 50）调用 `picjumbo.searchImages({ keyword:"nature", count: 50 })`，验证 hits 长度 ≥ 10（分页能累积）。
+  - 端到端（`source="picjumbo"`）：
+    - `spawn("node", [src/server.js])`，发送 MCP JSON-RPC：`initialize → notifications/initialized → tools/list → tools/call { keyword:"nature", save_dir:"tmp/picjumbo-e2e", count:3, size:"large", safesearch:true, source:"picjumbo" }`。
+    - 断言 `downloaded.length >= 1`，每个 downloaded 项含 `source === "picjumbo"` 且 `local_path` 文件存在，size > 10KB。
+  - 端到端（多源）：
+    - `tools/call { keyword:"nature", save_dir:"tmp/multi-e2e", count:6, size:"webformat", safesearch:true, source:["pixabay","picjumbo"] }`。
+    - 断言 downloaded 中至少同时出现 `source:"pixabay"` 与 `source:"picjumbo"` 两种项。
+- **Acceptance Criteria Addressed**: FR-6, AC-2, AC-3, AC-4
 - **Test Requirements**:
-  - `programmatic` TR-4.1: schema 对 `keyword=""` 校验失败；对 `count=500` 校验失败；对 `size="huge"` 校验失败。
-  - `programmatic` TR-4.2: schema 对合法输入校验通过，默认值正确（count=10, size=webformat, safesearch=true）。
-  - `programmatic` TR-4.3: handler 端到端调用（keyword=forest, save_dir=tmp/test-forest）返回 `total === downloaded.length`，目录下出现对应文件。
+  - `programmatic` TR-6.1: `node --test tests/picjumbo.test.js` 退出码 0。
+  - `programmatic` TR-6.2: `tmp/picjumbo-e2e/` 下至少有 1 个文件 size > 10KB。
+  - `programmatic` TR-6.3: `tmp/multi-e2e/` 下同时出现不同 source 的下载记录。
 
-## [ ] Task 5: MCP 服务器入口 (src/server.js)
+## [ ] Task 7: 回归验证 — 原有 `tests/tools.test.js` / `tests/e2e.test.js` 保持通过
 - **Priority**: P0
-- **Depends On**: Task 4
+- **Depends On**: Task 2, 3, 4, 5
 - **Description**:
-  - 使用 `@modelcontextprotocol/sdk` 的 `Server` + `StdioServerTransport` 启动。
-  - 在启动时调用 `server.setRequestHandler(listToolsRequestSchema, ...)` 返回 `search_and_download_images` tool。
-  - 注册 `callToolRequestSchema` handler，分发到 `src/tools.js`。
-  - `process` 级别 `uncaughtException` / `unhandledRejection` 监听器，写到 `console.error` 而不污染 stdout（避免破坏 MCP JSON-RPC）。
-- **Acceptance Criteria Addressed**: G1、G2、FR-2、NFR-3
+  - 运行 `npm test`（`node --test tests/`），确保旧测试全部通过。
+  - 如 `tests/tools.test.js` 的 schema 断言因新增字段受影响，微调断言（不影响对 keyword/count/size 的核心校验）。
+  - `tests/e2e.test.js` 不做业务输入修改（不传 source）。
+- **Acceptance Criteria Addressed**: AC-1, AC-6
 - **Test Requirements**:
-  - `programmatic` TR-5.1: `node src/server.js` 能接受 MCP 启动握手：echo 一个 `tools/list` 请求并得到含 `search_and_download_images` 的响应。
-  - `programmatic` TR-5.2: 运行时写入一条非法请求到 stdin 不会导致进程崩溃退出。
+  - `programmatic` TR-7.1: `npm test` 退出码 0。
 
-## [ ] Task 6: 端到端测试与脚本
-- **Priority**: P1
-- **Depends On**: Task 5
-- **Description**:
-  - `tests/e2e.test.js`：直接以子进程方式启动 MCP 服务器，模拟 MCP 握手，发送 `callTool`，断言 JSON 结果中 `downloaded` 列表长度 ≥ 1，且文件实际存在。
-  - `examples/sample_call.json`：提供一个示例 MCP JSON-RPC 请求体。
-  - `bin/run.sh` / `bin/run.bat`：不强制；可跳过，改为 README 直接写命令。
-- **Acceptance Criteria Addressed**: AC-1、AC-2、AC-3、AC-6
-- **Test Requirements**:
-  - `programmatic` TR-6.1: `node tests/e2e.test.js` 退出码 0，`tmp/e2e/` 下至少出现 3 个 jpg。
-  - `programmatic` TR-6.2: 测试中使用 `keyword="nature"`、`count=3`、`size="webformat"`，返回 `summary` 含 "已下载 3 张" 字样。
-
-## [ ] Task 7: README 与使用说明
-- **Priority**: P1
-- **Depends On**: Task 1-5
-- **Description**:
-  - 根目录 `README.md`：功能介绍、安装步骤（`npm install`）、环境变量说明（`PHOTO_GET_API_KEY`）、MCP 客户端配置示例（例如 Claude Desktop 的 `config.json` 片段）。
-  - 给出 2-3 个示例（nature 关键词、限定数量、使用 large 尺寸）。
-  - 注意安全说明：不要提交真实 API Key；遵守 Pixabay ToS。
-- **Acceptance Criteria Addressed**: FR-12、AC-7
-- **Test Requirements**:
-  - `human-judgement` TR-7.1: README 包含最小可运行片段 `npm install && node src/server.js` 以及 MCP 客户端配置示例。
-  - `human-judgement` TR-7.2: README 解释了 `search_and_download_images` 每个参数的含义与默认值。
-
-## 依赖关系图（DAG）
-
+## 依赖关系图 (DAG)
 ```
-Task 1 (脚手架)
- ├──> Task 2 (pixabay.js) ──┐
- └──> Task 3 (downloader.js)─┼──> Task 4 (tools.js) ──> Task 5 (server.js) ──> Task 6 (E2E 测试)
-                             └───────────────────────────────────────────────> Task 7 (README)
+Task 1 (src/picjumbo.js)
+ ├──> Task 5 (src/pixabay.js: 确保 hits 含 source="pixabay")
+ └──> Task 2 (src/tools.js: source 多值 + 分派 + 合并)
+          ├──> Task 3 (src/downloader.js: 透传 source)
+          └──> Task 4 (src/server.js schema 同步)
+                   └──> Task 6 (tests/picjumbo.test.js)
+                            └──> Task 7 (回归验证)
 ```
-
-## 技术实现要点
-- **MCP SDK 使用**：`new Server({ name: "photo-get-skill", version: "1.0.0" })`，然后 `connect(new StdioServerTransport())`。
-- **工具声明**：`server.setRequestHandler(ListToolsRequestSchema, ...)` 返回包含 `{ name, description, inputSchema: z.object({...}) }` 的列表。
-- **工具调用**：`server.setRequestHandler(CallToolRequestSchema, async (req) => {...})`；返回 `{ content: [{ type: "text", text: JSON.stringify(result) }], isError: false }`。
-- **网络请求**：使用 Node.js `https` 或 `fetch`（Node 18 内置），避免额外依赖。
-- **下载并发控制**：使用简单的 Promise 批次（每批 5 个），或 `p-limit` 风格实现。避免引入过多依赖。
-- **测试方式**：`node:test` + `assert`（无需 jest/mocha）。E2E 测试通过 `child_process.spawn` 启动 server 并写入 MCP JSON-RPC 消息到子进程 stdin；解析 stdout 中 JSON-RPC 响应。

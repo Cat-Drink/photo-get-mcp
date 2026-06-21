@@ -1,130 +1,122 @@
-# evergreen.photos 图片抓取 MCP - 产品需求文档 (PRD)
+# MCP 图片抓取 — 补充 picjumbo.com 源（多 source 支持 + 来源区分 + 翻页全量）- PRD
 
 ## Overview
-- **Summary**: 开发一个基于 Model Context Protocol (MCP) 的图片抓取工具服务器。用户通过指定关键词（keyword），即可从 evergreen.photos 网站（底层为 Pixabay API）搜索并下载相关图片，保存到本地指定目录，同时返回图片元数据（标题、作者、来源 URL、原始尺寸等）。
-- **Purpose**: 为需要大量免版税图片素材的 LLM 应用和工作流提供稳定、可编程的图片获取能力；绕开 evergreen.photos 的 Web UI，直接使用其后端 Pixabay API 进行程序化搜索和下载。
+- **Summary**: 在现有 `photo-get-skill` MCP 服务器基础上，**新增对 `https://picjumbo.com/` 的图片搜索与下载支持**，同时**支持多 source 并发生成结果**（`source` 接受多个值）。原有 Pixabay 源保持完全可用，并作为默认值包含在默认 source 列表中；每张图片在命中结果与最终下载结果里都**明确标注来源**（`source: "pixabay" | "picjumbo"`）。`picjumbo.com` 的分页能**自动翻到所有页并完整采集**。
+- **Purpose**: 拓展图片素材来源并可同时在多个源检索图片；在返回 payload 中区分来源，便于 LLM 下游进行过滤/去重/署名。
 - **Target Users**:
-  - LLM 应用开发者（接入 MCP 协议的 Claude/Trae 等助手）
-  - 内容创作者（需批量获取素材）
-  - 爬虫/数据工程工作流
-
-## 技术发现（前置调研结论）
-- evergreen.photos 是一个前端 SPA（React + Material-UI），无自己的图片数据库。
-- 它在前端直接调用 **Pixabay API**：`https://pixabay.com/api/?key=<KEY>&q=<KEYWORD>&image_type=photo&per_page=51&safesearch=true`
-- 前端源码 `index_bundle.js` 中暴露的 `apiKey` 为 `f101e2fbc08853f24c497feb6-34000831`，并在运行时 `.split('').reverse().join('')` 后拼接进 URL。
-- **实际可用 API Key**（已实测返回 200 + 图片数据）：`13800043-6bef794c42f35880cbf2e101f`
-- API 响应的 `hits[*]` 字段中，可用下载链接：
-  - `previewURL`（150px 宽，最小）
-  - `webformatURL`（默认 640px）
-  - `largeImageURL`（最大原始尺寸）
-- 图片实际下载 URL 在 `cdn.pixabay.com` 域名下，无反爬限制，简单 HTTP GET 即可下载。
-- Pixabay 免费 API 速率限制：每分钟 100 次请求。
+  - LLM 应用开发者（MCP + 多源图片工具）
+  - 内容创作者 / 设计师（批量获取多样化素材）
+  - 需要来源追踪或多源聚合的工作流
 
 ## Goals
-- [G1] 提供一个符合 **MCP (Model Context Protocol) 1.0** 规范的 **工具服务器**（stdin/stdout 或 SSE）。
-- [G2] 暴露 **至少一个 MCP tool**：`search_and_download_images`，接受关键词、保存路径、数量、尺寸等参数。
-- [G3] 成功执行后，图片被下载到用户指定本地目录，文件名包含图片 ID + 标题 slug，避免重名覆盖。
-- [G4] 工具返回结构化 JSON 结果，包含每张图片的本地路径、原始 URL、作者、标签、尺寸等元数据。
-- [G5] 提供配置化的 API Key（环境变量或配置文件），默认使用从 evergreen.photos 分析出的 Key，并允许用户替换为自己的 Pixabay Key。
-- [G6] 跨平台支持（Windows / macOS / Linux），Node.js 实现。
+- **[G1] 新增 `picjumbo.com` 源**：与 Pixabay 并列的检索+下载能力。
+- **[G2] `source` 支持多值**：用户可传 `"pixabay"`、`"picjumbo"`，也可传 `["pixabay", "picjumbo"]` 同时检索。
+- **[G3] 结果区分来源**：每个 `hit`、`downloaded` item、`failed` item 均含 `source` 字段。
+- **[G4] picjumbo 全量翻页**：能自动探测分页边界（通过搜索页底部分页链接或 `page={n} 404` 判断），按 `count` 截取，若 `count` 未设上限则采集所有页。
+- **[G5] 兼容旧行为**：不传 `source` 时默认走 `["pixabay"]`；旧 E2E 测试使用默认值能得到与之前一致的 Pixabay 结果。
+- **[G6] 测试覆盖**：同时验证多源场景与单 picjumbo 场景的检索+下载。
 
 ## Non-Goals (Out of Scope)
-- **不**提供图形化 UI（本项目聚焦 MCP 协议层）。
-- **不**实现图片编辑、OCR、压缩等后处理功能。
-- **不**实现用户账户/书签功能（对应 evergreen.photos 的登录功能）。
-- **不**实现视频/插画的搜索（`image_type=photo` 固定）。
-- **不**使用无头浏览器/Playwright 进行前端抓取，因为已暴露的 REST API 更稳定且符合 Pixabay ToS。
+- **不**使用无头浏览器/Playwright。
+- **不**改动 Pixabay 错误处理与 API Key 机制。
+- **不**新增其他源（本 PRD 仅 Pixabay + picjumbo）。
+- **不**新增 UI、OAuth、登录等。
 
 ## 背景与上下文
-- MCP 协议由 Anthropic 定义，允许 LLM 通过标准 JSON-RPC 调用外部工具。
-- MCP 服务器通常通过 stdio（子进程）或 HTTP (SSE) 与客户端通信。
-- 当前工作目录 `d:\Program\photo-get-skill` 为空目录，需全新搭建 Node.js 项目。
-- 使用 `@modelcontextprotocol/sdk` npm 包作为官方 SDK。
-- 使用 Node.js 原生 `https` 或轻量 `axios/fetch` 进行 API 调用和图片下载。
+- 现有模块：`src/pixabay.js`, `src/downloader.js`, `src/tools.js`, `src/server.js`，测试 `tests/tools.test.js` / `tests/e2e.test.js`。
+- picjumbo.com 搜索 URL：`https://picjumbo.com/search/{keyword}/page/{n}/`；第 1 页也可以直接 `https://picjumbo.com/search/{keyword}/`。
+- 分页探测策略：
+  - 从 `page=1` 开始 GET；
+  - 在每页 HTML 中寻找分页链接 `.../page/{n}/` 或 `<a>` 指向页码；若能解析出 `最后页` 或 `下一页` 链接，则继续；
+  - 若某页 `status=404` 或页面为空、或 HTML 中没有新的详情页 URL，则判定到达最后页；
+  - 对每页采集到的详情页 URL 去重（使用 URL 本身作为 key），避免重复下载。
+- 结果结构：统一为 `hits`，字段包含 `id, source, previewURL, webformatURL, largeImageURL, user, tags, imageWidth, imageHeight, page_url`。`downloaded/failed` 中新增 `source` 字段（与 `pixabay_id` 并存，便于区分来源 ID 与源）。
+- `source` 参数类型：设计为 `string | string[]`。在 Zod schema 中使用 `z.union([z.enum(["pixabay","picjumbo"]), z.array(z.enum(["pixabay","picjumbo"]))]).default(["pixabay"])`；在 JSON Schema 中写作 `{ "oneOf": [{"enum":["pixabay","picjumbo"]}, {"type":"array","items":{"enum":["pixabay","picjumbo"]}}], "default": ["pixabay"] }`。MCP tool 调用传入字符串或数组都允许。
+- 并发分派：若 `source` 含多个源，则分别调用对应源的 `searchImages`，按顺序合并 hits，最终再统一走 `concurrentDownloadBatch`；`summary` 写明每个源下载数量。
 
 ## 功能需求 (Functional Requirements)
-- **FR-1**: 初始化一个 npm 项目（package.json + 依赖：`@modelcontextprotocol/sdk`、`zod`）。
-- **FR-2**: 实现 MCP 服务器入口 `src/server.js`，在启动时向客户端声明一个 `search_and_download_images` tool。
-- **FR-3**: `search_and_download_images` 的参数 Schema（基于 Zod）：
-  - `keyword`（string，必填，1-100 字符）
-  - `save_dir`（string，必填，绝对或相对路径）
-  - `count`（number，默认 10，范围 1-200）
-  - `size`（string，枚举 `large|webformat|preview`，默认 `webformat`）
-  - `safesearch`（boolean，默认 true）
-- **FR-4**: 调用 Pixabay API 获取图片元数据；当 `count > 200` 时自动分批（`per_page=200` + `page` 分页），Pixabay 总限制为最多返回 500 条。
-- **FR-5**: 若 `save_dir` 不存在，自动创建（含多级目录）。
-- **FR-6**: 并发/顺序下载多张图片至本地；默认并发数 5（可配），避免触发 Pixabay 速率限制。
-- **FR-7**: 文件名格式：`<pixabay_id>-<slugified_first_tag>.<ext>`；扩展根据 Content-Type 或 URL 推断（通常为 jpg）。
-- **FR-8**: 下载失败（超时/4xx/5xx）时重试最多 2 次；仍然失败则记录到返回结果的 `failed` 列表，不中断整个批次。
-- **FR-9**: 图片下载时校验 Content-Length / 实际写入大小非零；零字节文件视为失败。
-- **FR-10**: 工具返回 JSON 结果结构：`{ total: n, downloaded: [...], failed: [...], save_dir: string }`；每项包含 `local_path, original_url, author, tags, width, height, pixabay_id`。
-- **FR-11**: 允许通过环境变量 `PHOTO_GET_API_KEY` 覆盖默认 API Key；未设置时回退到内置 Key。
-- **FR-12**: 提供 `README` 用法说明（MCP 客户端配置方式、可用 tools、示例调用）。
+- **FR-1（`src/picjumbo.js`）**:
+  - 导出 `async searchImages({ keyword, count })`。
+  - 自动翻页到边界：每页获取详情页 URL 列表；收集到 `count` 即停止；未设置上限时采集所有页。
+  - 去重：以详情页 URL 或 `image=<id>` 作为去重 key。
+  - 解析详情页提取 `largeImageURL`（og:image / 正文大图）、`previewURL/webformatURL`（缩略图）、`user`（作者信息）、`tags`（标题 + keyword 派生）。
+  - 输出 hit：`{ id, source="picjumbo", previewURL, webformatURL, largeImageURL, user, tags, imageWidth, imageHeight, page_url }`。
+  - 错误类型：`PicjumboScrapeError / NetworkError`。
+- **FR-2（`src/tools.js` schema 扩展）**:
+  - `source` 改为 `z.union([z.enum(["pixabay","picjumbo"]), z.array(z.enum(["pixabay","picjumbo"]))]).default(["pixabay"])`；内部 normalize 成 `string[]` 后做分派。
+  - `searchAndDownloadImagesInputSchema` 对应 JSON Schema 同步为 `oneOf`（字符串或字符串数组），默认 `["pixabay"]`。
+- **FR-3（`src/tools.js` handler 分派 & 合并）**:
+  - 对每个 source 调用对应的 `searchImages`：
+    - `pixabay`：保留 `{ keyword, count, safesearch }`，按比例（或按均等）分配 count 到各源（例如 `count / sources.length`）。
+    - `picjumbo`：保留 `{ keyword, count }`。
+  - 合并 hits（保持顺序：先 pixabay 的 hits，再 picjumbo 的 hits），最终截取至 `count` 条。
+  - 每个 hit 必须带 `source` 字段，以便下载结果与回显区分。
+  - 对任一源失败：不崩溃；返回 `isError: true` 的 MCP 内容，错误文本中明确标出是哪个源失败。
+- **FR-4（下载结果区分来源）**:
+  - `src/downloader.js` 的 `pickUrl / buildFileName` 保持兼容（依赖 `previewURL/webformatURL/largeImageURL/tags/id`）。
+  - `concurrentDownloadBatch` 输出的 `downloaded / failed` 项需要新增 `source` 字段（从 hit 中透传）。
+  - 字段集合：`local_path, original_url, author, tags, width, height, pixabay_id, source`。其中 `pixabay_id` 在 `source="picjumbo"` 时即为 picjumbo 的图片 id。
+- **FR-5（`src/server.js` 同步）**:
+  - 将 `server.js` 中的 Zod schema 同步为多值 source（与 tools.js 一致）。
+- **FR-6（测试）**:
+  - `tests/tools.test.js`：新增断言 `source="unknown"` 报校验错误；默认值为 `["pixabay"]`；允许传入 `"picjumbo"` 字符串或 `["pixabay","picjumbo"]` 数组。
+  - `tests/picjumbo.test.js`：
+    - 单元：`picjumbo.searchImages({ keyword: "nature", count: 5 })` 返回 hits 长度 ≥ 1，且 `source === "picjumbo"`。
+    - 单元：无 keyword 返回 `[]`。
+    - 端到端：调用 MCP `source="picjumbo"`，断言 `downloaded` 项 `source === "picjumbo"`，文件存在且 size > 10KB。
+  - `tests/e2e.test.js` 保持不变（默认 `["pixabay"]`），仍验证 `downloaded.length === 3` 等。
 
 ## 非功能需求 (Non-Functional Requirements)
-- **NFR-1 (可靠性)**: 单张图片下载失败不影响其他图片。
-- **NFR-2 (性能)**: 5 张并发下载 + 分批获取元数据，100 张图片的完整抓取应在 60 秒内完成（视网络而定）。
-- **NFR-3 (可观测性)**: 通过 `console.error` 输出日志，MCP 协议日志与业务日志分流；工具返回值中自带 `summary` 文本字段以便 LLM 直接阅读。
-- **NFR-4 (安全性)**: 不记录/上传用户本地路径；API Key 不从日志输出。
-- **NFR-5 (跨平台)**: 路径拼接统一使用 `path.join`，不硬编码 `\` 或 `/`。
-- **NFR-6 (可维护性)**: 核心逻辑拆分为独立模块：`src/pixabay.js` (API 客户端)、`src/downloader.js` (下载/重试)、`src/tools.js` (MCP tool 处理器)、`src/server.js` (服务器入口)。
+- **NFR-1（健壮分页）**: 分页边界通过 `404 / 空页 / 无详情 URL / 重复 page` 判定；对未知 HTML 结构应降级为返回现有 hits 而非抛异常。
+- **NFR-2（网络可靠）**: 请求超时 30s，重试 1-2 次；并发生成详情页时 `concurrency ≤ 5`。
+- **NFR-3（安全）**: 仅下载 host 属于 picjumbo 官方域名的 URL；拒绝跳转至外部站点。
+- **NFR-4（不新增依赖）**: 仅使用 Node 内置 `fetch` 与正则解析。
 
 ## 约束
-- **技术栈**: Node.js >= 18，npm，`@modelcontextprotocol/sdk`（最新稳定版），`zod`。
-- **外部依赖**: 仅 Pixabay API；无数据库、无缓存服务器。
-- **API 限制**: Pixabay 每分钟最多 100 请求，`per_page` 最大 200，总结果最多 500。
-- **合规**: 遵守 Pixabay Content License（免费商用，无需署名，默认启用 safesearch）。
+- Node.js >= 18；无新 npm 包。
+- 测试环境需同时能访问 pixabay.com 与 picjumbo.com。
 
 ## 假设
-- 用户运行环境有 Node.js >= 18 与可用网络连接。
-- evergreen.photos 前端使用的 Pixabay API Key 可持续使用；若失效，用户可通过 `PHOTO_GET_API_KEY` 替换为自己的 Key。
-- 用户在 Windows 上使用 MCP 客户端（如 Trae/VS Code/ Claude Desktop）能正确配置 stdio 子进程。
+- picjumbo 搜索与详情页结构保持稳定；若有变化，解析规则需改 `picjumbo.js` 即可。
+- 单源失败不阻塞整个 MCP 工具返回结果（至少返回成功的源）。
 
 ## 验收标准 (Acceptance Criteria)
 
-### AC-1: MCP 服务器启动并正确声明工具
-- **Given**: 已执行 `npm install`
-- **When**: 执行 `node src/server.js`
-- **Then**: 进程不立即退出；通过 MCP `tools/list` 查询能返回包含 `search_and_download_images` 的列表，tool 的 inputSchema 正确描述所有参数。
+### AC-1: 不传 `source` 时默认走 `["pixabay"]`，与旧行为一致
+- **Given**: 未传 `source`
+- **When**: 以 `keyword="nature", save_dir="tmp/e2e-test", count=3` 调用
+- **Then**: `downloaded.length === 3`，且每个 item `source === "pixabay"`；旧 E2E 测试通过。
 - **Verification**: `programmatic`
 
-### AC-2: 关键词搜索返回有效图片元数据
-- **Given**: 网络可用、API Key 有效
-- **When**: 以 `keyword="nature"` 调用 `search_and_download_images`
-- **Then**: Pixabay API 返回 200；解析出的 hits 数组非空；每张图片有 `id`、`largeImageURL`/`webformatURL`。
+### AC-2: `source="picjumbo"` 单源检索+下载
+- **Given**: 网络可用
+- **When**: `source="picjumbo", keyword="nature", count=3, size="large"`
+- **Then**: `downloaded.length >= 1`，每个 item `source === "picjumbo"`，文件 size > 10KB。
 - **Verification**: `programmatic`
 
-### AC-3: 图片成功下载到指定目录且文件非空
-- **Given**: 指定了一个不存在的目录 `./tmp/nature-images`
-- **When**: 以 `count=5, size=webformat, save_dir="./tmp/nature-images"` 调用工具
-- **Then**: 目录被自动创建；目录下出现至少 5 个 `.jpg` 文件；每个文件大小 > 10KB；返回结果 `downloaded` 列表有 5 项且每项含有效 `local_path`。
+### AC-3: `source=["pixabay","picjumbo"]` 多源合并
+- **Given**: 两个源都可用
+- **When**: `source=["pixabay","picjumbo"], keyword="nature", count=6`
+- **Then**: payload 中 `downloaded` 至少同时包含 `source="pixabay"` 与 `source="picjumbo"` 项；`summary` 同时提到两个来源。
 - **Verification**: `programmatic`
 
-### AC-4: 无效 API Key / 无网络时返回清晰错误
-- **Given**: 环境变量 `PHOTO_GET_API_KEY` 被设置为无效值
-- **When**: 调用工具
-- **Then**: 工具不崩溃；返回 `isError: true` 的 MCP 内容；错误信息含 "API key" 或 "网络" 提示。
+### AC-4: picjumbo 分页能翻到所有页
+- **Given**: keyword 返回的总条数较多（> 单页）
+- **When**: 不设置 `count` 或设置较大 `count`
+- **Then**: `picjumbo.searchImages` 返回 hits 数 ≥ 单页条数；翻页到达边界后自动停止，不产生无限循环。
 - **Verification**: `programmatic`
 
-### AC-5: 参数校验（非法 count / 空 keyword）
-- **Given**: 客户端构造工具调用
-- **When**: `count=500` 或 `keyword=""`
-- **Then**: MCP 框架级 Zod 校验拦截并返回结构化错误，不进入业务逻辑。
+### AC-5: 无效 `source` 在 Zod 层被拦截
+- **Given**: 客户端构造 tool 调用
+- **When**: `source="unknown"` 或 `source=["pixabay","unknown"]`
+- **Then**: 返回参数校验失败错误，不进入业务逻辑。
 - **Verification**: `programmatic`
 
-### AC-6: 部分图片下载失败不影响其他
-- **Given**: 模拟部分 URL 不可达（通过后续注入测试或 mock）
-- **When**: 执行批次下载
-- **Then**: `downloaded` 列表含成功项，`failed` 列表含失败项及错误原因，工具返回状态为成功。
+### AC-6: 单源失败返回友好错误，不崩溃
+- **Given**: 模拟 picjumbo 不可达
+- **When**: `source="picjumbo"` 调用
+- **Then**: handler 返回 `isError: true`，错误文本含 `"picjumbo"` 或 `"Network"`。
 - **Verification**: `programmatic`
-
-### AC-7: README 与 MCP 客户端配置示例
-- **Given**: 用户阅读 README
-- **When**: 按照 README 在 MCP 客户端（如 claude_desktop 的 config.json）进行 stdio 配置
-- **Then**: 助手能看到并调用 `search_and_download_images` 工具。
-- **Verification**: `human-judgment`
 
 ## 开放问题
-- [ ] 是否需要额外暴露一个纯搜索 tool（仅返回元数据、不下载）？— 暂定不做，如后续需要再加。
-- [ ] 是否需要支持按颜色/方向/最小尺寸等 Pixabay 高级筛选？— 暂定第一版仅支持关键词 + safesearch。
-- [ ] 图片尺寸选项是否需要支持自定义 `per_page` / 分页？— 已在 FR-4 处理。
+- 多源时的 `count` 分配策略（平均分配 / 先到先得）— 默认按 `Math.ceil(count / sources.length)` 分配到每源，最后合并再截取到 `count`。

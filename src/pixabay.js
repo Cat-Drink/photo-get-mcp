@@ -61,7 +61,7 @@ export async function searchImages({ keyword, count = 10, safesearch = true, api
 
     for (const hit of pageHits) {
       if (hits.length >= target) break;
-      hits.push(hit);
+      hits.push({ ...hit, source: 'pixabay' });
     }
 
     if (hits.length >= maxTotal) break;

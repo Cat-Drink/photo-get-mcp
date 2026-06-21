@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test tests/"
+    "test": "node --test tests/tools.test.js tests/picjumbo.test.js tests/server-handshake.test.js tests/e2e.test.js"
   },
   "keywords": [],
   "author": "",
