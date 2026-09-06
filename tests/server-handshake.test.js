@@ -103,7 +103,7 @@ test("MCP server: initialize + tools/list handshake", async (t) => {
         reject(new Error("Timeout waiting for MCP server ready log"));
       }, 10000);
       const check = () => {
-        if (stderrBuf.includes("[photo-get-skill] MCP server ready")) {
+        if (stderrBuf.includes("[photo-get-mcp] MCP server ready")) {
           clearTimeout(deadline);
           resolve();
         }
@@ -130,7 +130,7 @@ test("MCP server: initialize + tools/list handshake", async (t) => {
     assert.ok(resp.result, "响应应包含 result");
     assert.ok(resp.result.protocolVersion, "result 应包含 protocolVersion");
     assert.ok(resp.result.serverInfo, "result 应包含 serverInfo");
-    assert.equal(resp.result.serverInfo.name, "photo-get-skill");
+    assert.equal(resp.result.serverInfo.name, "photo-get-mcp");
   });
 
   await t.test("initialized notification accepted", async () => {

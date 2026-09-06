@@ -1,5 +1,5 @@
 {
-  "name": "photo-get-skill",
+  "name": "photo-get-mcp",
   "version": "1.1.0",
   "description": "MCP 图片抓取服务器：按关键词从 Pixabay / Picjumbo 搜索并下载免版权图片",
   "main": "src/server.js",

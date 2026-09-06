@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { toolRegistrations } from "./tools.js";
 
-const SERVER_NAME = "photo-get-skill";
+const SERVER_NAME = "photo-get-mcp";
 const SERVER_VERSION = "1.1.0";
 
 const mcpServer = new McpServer({
