@@ -28,7 +28,9 @@ function normalizeSources(input) {
   return ["pixabay"];
 }
 
-export const searchAndDownloadImagesSchema = z.object({
+// Zod raw shape：MCP registerTool 需要 raw shape，测试需要完整 z.object，
+// 因此拆成两份导出，单一来源。
+export const searchAndDownloadImagesShape = {
   keyword: z.string().min(1, "keyword不能为空").max(100, "keyword过长"),
   save_dir: z.string().min(1, "save_dir不能为空"),
   count: z.number().int().min(1, "count必须≥1").max(200, "count必须≤200").default(10),
@@ -38,7 +40,9 @@ export const searchAndDownloadImagesSchema = z.object({
     .union([z.string(), z.array(z.string())])
     .optional()
     .describe("图片来源，可选 'pixabay' 或 'picjumbo'，或数组（如 ['pixabay','picjumbo']）。默认 'pixabay'。"),
-});
+};
+
+export const searchAndDownloadImagesSchema = z.object(searchAndDownloadImagesShape);
 
 export const searchAndDownloadImagesInputSchema = {
   type: "object",
@@ -200,3 +204,13 @@ export const tools = [
 export const handlers = {
   search_and_download_images: searchAndDownloadImagesHandler,
 };
+
+// server.js 遍历此列表完成注册：schema 与 handler 只在 tools.js 定义一份。
+export const toolRegistrations = [
+  {
+    name: "search_and_download_images",
+    description: "按关键词从 Pixabay 和/或 Picjumbo 搜索图片并保存到本地目录。返回图片元数据与本地保存路径。",
+    inputSchema: searchAndDownloadImagesShape,
+    handler: searchAndDownloadImagesHandler,
+  },
+];

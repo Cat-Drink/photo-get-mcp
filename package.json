@@ -1,7 +1,7 @@
 {
   "name": "photo-get-skill",
-  "version": "1.0.0",
-  "description": "",
+  "version": "1.1.0",
+  "description": "MCP 图片抓取服务器：按关键词从 Pixabay / Picjumbo 搜索并下载免版权图片",
   "main": "src/server.js",
   "type": "module",
   "engines": {
@@ -9,11 +9,20 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test tests/tools.test.js tests/picjumbo.test.js tests/server-handshake.test.js tests/e2e.test.js"
+    "test": "node --test tests/tools.test.js tests/picjumbo.test.js tests/server-handshake.test.js tests/e2e.test.js",
+    "test:fast": "node --test tests/tools.test.js tests/picjumbo.test.js tests/server-handshake.test.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "image-search",
+    "pixabay",
+    "picjumbo",
+    "stock-photos",
+    "image-downloader"
+  ],
+  "author": "chenwentao",
+  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
